@@ -195,10 +195,12 @@ def uniform_brier(span: int = 6) -> float:
 
 
 # ----------------------------- EMOS / NGR fit --------------------------------
-def run_emos(days: int, write: bool, source: str = "era5") -> None:
+def run_emos(days: int, write: bool, source: str = "era5",
+             end_str: str = "") -> None:
     """Fit per-station EMOS coefficients (a,b,c,d) by minimising CRPS and, with
-    --write, merge them into config/calibration.yaml (preferred over bias/sigma)."""
-    end = dt.date.today() - dt.timedelta(days=6)
+    --write, merge them into config/calibration.yaml (preferred over bias/sigma).
+    `end_str` lets you fit on an older window for out-of-sample validation."""
+    end = dt.date.fromisoformat(end_str) if end_str else dt.date.today() - dt.timedelta(days=6)
     start = end - dt.timedelta(days=days)
     print(f"EMOS fit window: {start} … {end}  ({days} days)\n")
     print(f"  {'stn':6}{'city':12}{'n':>4}{'a':>7}{'b':>6}{'c':>7}{'d':>7}"
@@ -288,9 +290,11 @@ def main() -> None:
     ap.add_argument("--source", choices=["era5", "metar"], default="era5",
                     help="actuals source: 'metar' = real station obs "
                          "(resolution-aligned, IEM ASOS); 'era5' = reanalysis")
+    ap.add_argument("--end", default="", help="fit window end date YYYY-MM-DD "
+                    "(for out-of-sample validation); default = today-6")
     args = ap.parse_args()
     if args.emos:
-        run_emos(args.days, args.write, args.source)
+        run_emos(args.days, args.write, args.source, args.end)
     elif args.backtest:
         run_backtest(args.days, args.write, args.source)
     else:

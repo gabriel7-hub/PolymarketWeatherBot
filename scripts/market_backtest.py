@@ -111,7 +111,8 @@ def decision_ts(date: str, hour: int) -> int:
 
 
 def run(pages: int, edge_thr: float, hour: int,
-        min_price: float, max_price: float, limit: int, workers: int = 16) -> None:
+        min_price: float, max_price: float, limit: int, workers: int = 16,
+        eval_after: str = "") -> None:
     events = fetch_closed_events(pages, limit)
     print(f"Closed temperature events fetched: {len(events)}", flush=True)
 
@@ -120,9 +121,13 @@ def run(pages: int, edge_thr: float, hour: int,
     for ev in events:
         resolved = resolved_outcomes(ev)
         for tm in parse_event(ev):
+            d = tm.end_date[:10]
+            if eval_after and d < eval_after:        # out-of-sample window only
+                continue
             if tm.station_code in STATIONS and tm.condition_id in resolved:
-                cand.append((tm, tm.end_date[:10], resolved[tm.condition_id]))
-    print(f"Candidate bucket-markets (our cities): {len(cand)}", flush=True)
+                cand.append((tm, d, resolved[tm.condition_id]))
+    note = f" (eval markets on/after {eval_after})" if eval_after else ""
+    print(f"Candidate bucket-markets (our cities): {len(cand)}{note}", flush=True)
 
     # 2) forecasts: one per unique (station, date), fetched concurrently
     keys = sorted({(tm.station_code, d) for tm, d, _ in cand})
@@ -208,9 +213,11 @@ def main() -> None:
     ap.add_argument("--min-price", type=float, default=0.03)
     ap.add_argument("--max-price", type=float, default=0.97)
     ap.add_argument("--limit", type=int, default=0, help="cap # temperature events")
+    ap.add_argument("--eval-after", default="", help="only evaluate markets "
+                    "resolving on/after YYYY-MM-DD (out-of-sample test)")
     args = ap.parse_args()
     run(args.pages, args.edge, args.decision_hour, args.min_price, args.max_price,
-        args.limit)
+        args.limit, eval_after=args.eval_after)
 
 
 if __name__ == "__main__":
