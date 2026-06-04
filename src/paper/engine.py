@@ -1,0 +1,213 @@
+"""Paper-trading broker: executes signals against a virtual cash balance, marks
+open positions to live Polymarket prices, and settles them on resolution.
+
+No real orders are sent — this is the week-long paper run before going live.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import re
+import time
+
+import requests
+
+from ..config import GAMMA_API, STATIONS
+from ..forecast.openmeteo import fetch_actual_max
+from ..forecast.metar import fetch_station_daily_max
+from ..strategy.edge import Signal
+from .. import notify
+from . import store
+
+
+def _city(question: str) -> str:
+    m = re.search(r"in ([\w ]+?) be ", question)
+    return m.group(1).strip() if m else ""
+
+
+def _market_state(condition_id: str) -> dict | None:
+    """Live price + resolution state for a market, by condition id."""
+    try:
+        r = requests.get(f"{GAMMA_API}/markets",
+                         params={"condition_ids": condition_id}, timeout=15)
+        r.raise_for_status()
+        d = r.json()
+    except Exception:  # noqa: BLE001
+        return None
+    if not d:
+        return None
+    m = d[0]
+    prices = m.get("outcomePrices")
+    tokens = m.get("clobTokenIds")
+    if isinstance(prices, str):
+        prices = json.loads(prices)
+    if isinstance(tokens, str):
+        tokens = json.loads(tokens)
+    return {"closed": bool(m.get("closed")),
+            "prices": [float(p) for p in prices],
+            "tokens": tokens,
+            "uma": m.get("umaResolutionStatus")}
+
+
+class PaperBroker:
+    def __init__(self):
+        self.con = store.connect()
+
+    # ---- execution --------------------------------------------------------
+    def already_open(self, token_id: str) -> bool:
+        row = self.con.execute(
+            "SELECT 1 FROM fills WHERE token_id=? AND status='open'", (token_id,)
+        ).fetchone()
+        return row is not None
+
+    def execute(self, sig: Signal) -> bool:
+        """Fill a signal at its quoted price if we have cash and aren't already in."""
+        if self.already_open(sig.token_id) or sig.stake <= 0:
+            return False
+        cash = store.get_meta(self.con, "cash")
+        cost = min(sig.stake, cash)
+        if cost < 1:
+            return False
+        shares = round(cost / sig.price, 2)
+        m = sig.market
+        self.con.execute(
+            """INSERT INTO fills (ts,event_slug,market_slug,question,city,condition_id,
+               token_id,side,entry_price,shares,cost,model_prob,edge,end_date,status,
+               mark_price,pnl,station,fc_date,fc_mean,fc_std)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open', ?, 0, ?,?,?,?)""",
+            (time.time(), m.event_slug, m.market_slug, m.question, _city(m.question),
+             m.condition_id, sig.token_id, sig.side, sig.price, shares, cost,
+             sig.model_prob, sig.edge, m.end_date, sig.price,
+             sig.station, sig.date, sig.fc_mean, sig.fc_std))
+        store.set_meta(self.con, "cash", cash - cost)
+        self.con.commit()
+        return True
+
+    def log_forecast(self, sig: Signal) -> None:
+        """Record the forecast distribution we acted on, for later calibration."""
+        if not sig.station:
+            return
+        self.con.execute(
+            """INSERT INTO forecasts (station,date,ts_logged,mean,std,n_members)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT(station,date) DO UPDATE SET mean=excluded.mean,
+               std=excluded.std, ts_logged=excluded.ts_logged""",
+            (sig.station, sig.date, time.time(), sig.fc_mean, sig.fc_std, 0))
+        self.con.commit()
+
+    # ---- marking & settlement --------------------------------------------
+    def mark_and_settle(self) -> None:
+        rows = self.con.execute("SELECT * FROM fills WHERE status='open'").fetchall()
+        seen: dict[str, dict] = {}
+        newly_settled: list[dict] = []
+        for f in rows:
+            cid = f["condition_id"]
+            if cid not in seen:
+                st = _market_state(cid)
+                if st:
+                    seen[cid] = st
+            st = seen.get(cid)
+            if not st:
+                continue
+            try:
+                idx = st["tokens"].index(f["token_id"])
+            except ValueError:
+                continue
+            price = st["prices"][idx]
+            resolved = st["closed"] and price in (0.0, 1.0)
+            if resolved:
+                payout = f["shares"] * price
+                pnl = payout - f["cost"]
+                # Did the YES outcome win?  outcomes order is [Yes, No].
+                yes_price = st["prices"][0]
+                resolved_yes = 1 if yes_price >= 0.5 else 0
+                cash = store.get_meta(self.con, "cash")
+                store.set_meta(self.con, "cash", cash + payout)
+                self.con.execute(
+                    """UPDATE fills SET status='settled', mark_price=?, exit_price=?,
+                       pnl=?, resolved_yes=? WHERE id=?""",
+                    (price, price, pnl, resolved_yes, f["id"]))
+                settled = dict(f)
+                settled.update(pnl=pnl, exit_price=price)
+                newly_settled.append(settled)
+            else:
+                unreal = f["shares"] * price - f["cost"]
+                self.con.execute("UPDATE fills SET mark_price=?, pnl=? WHERE id=?",
+                                 (price, unreal, f["id"]))
+        self.con.commit()
+        self.snapshot()
+        if newly_settled:
+            self._notify_settlements(newly_settled)
+
+    def _notify_settlements(self, settled: list[dict]) -> None:
+        if not notify.enabled():
+            return
+        start = store.get_meta(self.con, "starting_cash")
+        eq = self.con.execute(
+            "SELECT equity, realized FROM equity ORDER BY ts DESC LIMIT 1").fetchone()
+        tally = self.con.execute(
+            "SELECT COUNT(*) n, COALESCE(SUM(pnl>0),0) w FROM fills "
+            "WHERE status='settled'").fetchone()
+        balance = {"equity": eq["equity"] if eq else start,
+                   "realized": eq["realized"] if eq else 0.0,
+                   "wins": tally["w"], "settled": tally["n"]}
+        for f in settled:
+            notify.notify_settlement(f, balance)
+
+    def backfill_actuals(self) -> int:
+        """Fill realized max-temp for past forecast dates (ERA5 archive).
+
+        The authoritative truth for traded markets is the Polymarket resolution
+        (captured as resolved_yes on fills); this gives the *temperature-level*
+        truth used to learn per-station bias/sigma.
+        """
+        today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        rows = self.con.execute(
+            "SELECT station, date FROM forecasts WHERE actual_max IS NULL "
+            "AND date < ?", (today,)).fetchall()
+        n = 0
+        for r in rows:
+            s = STATIONS.get(r["station"])
+            if not s:
+                continue
+            # prefer the real resolution source (station METAR); fall back to ERA5
+            actual = fetch_station_daily_max(r["station"], r["date"], s["tz"])
+            src = "metar"
+            if actual is None:
+                actual = fetch_actual_max(s["lat"], s["lon"], r["date"], s["tz"])
+                src = "era5"
+            if actual is not None:
+                self.con.execute(
+                    "UPDATE forecasts SET actual_max=?, actual_src=? "
+                    "WHERE station=? AND date=?", (actual, src, r["station"], r["date"]))
+                n += 1
+        self.con.commit()
+        return n
+
+    def snapshot(self) -> None:
+        cash = store.get_meta(self.con, "cash")
+        start = store.get_meta(self.con, "starting_cash")
+        opens = self.con.execute(
+            "SELECT shares, mark_price, cost FROM fills WHERE status='open'").fetchall()
+        pos_value = sum(o["shares"] * o["mark_price"] for o in opens)
+        unrealized = sum(o["shares"] * o["mark_price"] - o["cost"] for o in opens)
+        realized = self.con.execute(
+            "SELECT COALESCE(SUM(pnl),0) s FROM fills WHERE status='settled'"
+        ).fetchone()["s"]
+        equity = cash + pos_value
+        self.con.execute(
+            "INSERT OR REPLACE INTO equity VALUES (?,?,?,?,?,?)",
+            (round(time.time()), cash, pos_value, realized, unrealized, equity))
+        self.con.commit()
+
+    # ---- dashboard feed ---------------------------------------------------
+    def record_signals(self, signals: list[Signal], taken_tokens: set[str]) -> None:
+        self.con.execute("DELETE FROM signals")
+        now = time.time()
+        for s in signals:
+            self.con.execute(
+                "INSERT INTO signals VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (now, s.market.event_slug, s.market.question, _city(s.market.question),
+                 s.side, s.price, s.model_prob, s.edge, s.stake,
+                 1 if s.token_id in taken_tokens else 0))
+        self.con.commit()
