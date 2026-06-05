@@ -22,15 +22,12 @@ from .config import (ROOT, STATIONS, BANKROLL, CALIBRATION, DRY_RUN, NOWCAST,
 from .analysis.resolution_audit import summarize as summarize_audit
 from .paper import store
 from .polymarket.gamma import fetch_open_temperature_events, parse_event
-from .forecast.openmeteo import fetch_max_temp_distribution, MODELS
-from .forecast.model import yes_probability, apply_calibration
-from .forecast import nowcast as nowcast_mod
+from .forecast.openmeteo import MODELS
+from .forecast.model import yes_probability
+from .forecast import dist_cache
 
 WEB = ROOT / "web"
 app = Flask(__name__, static_folder=None)
-
-_fc_cache: dict[tuple, tuple[float, dict]] = {}
-
 
 def db():
     return store.connect()
@@ -123,7 +120,10 @@ def daily():
 
 @app.get("/api/forecast")
 def forecast():
-    """Live ensemble distribution vs market-implied bucket probabilities for one event."""
+    """Ensemble distribution vs market-implied bucket probabilities for one event.
+
+    Reads the distribution the daemon already fetched + persisted — the dashboard
+    makes no Open-Meteo calls of its own (only fresh market prices via Gamma)."""
     slug = request.args.get("event", "")
     events = fetch_open_temperature_events()
     ev = next((e for e in events if e.get("slug") == slug), None)
@@ -135,24 +135,21 @@ def forecast():
     if not station:
         return jsonify({"error": "unknown station"}), 404
     date = markets[0].end_date[:10]
-    key = (station, date)
-    now = time.time()
-    if key in _fc_cache and now - _fc_cache[key][0] < 600:
-        fc = _fc_cache[key][1]
-    else:
-        s = STATIONS[station]
-        f = fetch_max_temp_distribution(s["lat"], s["lon"], date, s["tz"], station)
-        fc = {"mean": f.mean, "std": f.std, "members": f.members_max_c.tolist(), "_obj": f}
-        _fc_cache[key] = (now, fc)
+    payload = store.load_forecast_dist(db(), station, date, "ensemble")
+    if payload is None:
+        return jsonify({"error": "forecast warming up — the daemon hasn't cached "
+                        "this city yet"}), 503
+    fc = dist_cache.ensemble_from_payload(station, date, payload)
     buckets = []
     for m in sorted(markets, key=lambda x: x.threshold_c):
-        p = yes_probability(fc["_obj"], m.bucket_kind, m.threshold_c)
+        p = yes_probability(fc, m.bucket_kind, m.threshold_c)
         buckets.append({"label": f"{m.threshold_c}°", "kind": m.bucket_kind,
                         "degree": m.threshold_c, "model": p, "market": m.yes_price})
     s = STATIONS[station]
     return jsonify({"event": slug, "city": s["city"], "station": station,
-                    "date": date, "mean": fc["mean"], "std": fc["std"],
-                    "members": fc["members"], "buckets": buckets})
+                    "date": date, "mean": payload["mean"], "std": payload["std"],
+                    "members": payload["members"], "buckets": buckets,
+                    "updated": payload["ts"]})
 
 
 @app.get("/api/status")
@@ -265,13 +262,12 @@ def resolution_audit():
     return jsonify(out)
 
 
-_nc_cache: dict[tuple, tuple[float, dict]] = {}
-
-
 @app.get("/api/nowcast")
 def nowcast():
     """Tier-3 intraday nowcast for one event: observed station floor + remaining
-    hours, with the collapse meter and ENS-vs-NOW-vs-MKT bucket probabilities."""
+    hours, with the collapse meter and ENS-vs-NOW-vs-MKT bucket probabilities.
+
+    Served from the daemon's persisted distributions — no Open-Meteo calls here."""
     slug = request.args.get("event", "")
     events_ = fetch_open_temperature_events()
     ev = next((e for e in events_ if e.get("slug") == slug), None)
@@ -282,28 +278,20 @@ def nowcast():
     if not station:
         return jsonify({"error": "unknown station"}), 404
     date = markets[0].end_date[:10]
-    key = (station, date)
-    now = time.time()
-    if key in _nc_cache and now - _nc_cache[key][0] < 300:
-        nc, fc = _nc_cache[key][1]["_nc"], _nc_cache[key][1]["_fc"]
-    else:
-        try:
-            nc = nowcast_mod.build_nowcast(station, date)
-        except Exception as e:  # noqa: BLE001
-            return jsonify({"error": f"nowcast failed: {e}"}), 502
-        s = STATIONS[station]
-        try:
-            fc = apply_calibration(fetch_max_temp_distribution(
-                s["lat"], s["lon"], date, s["tz"], station), CALIBRATION)
-        except Exception:  # noqa: BLE001
-            fc = None
-        _nc_cache[key] = (now, {"_nc": nc, "_fc": fc})
+    con = db()
+    nc = store.load_forecast_dist(con, station, date, "nowcast")
+    if nc is None:
+        return jsonify({"error": "nowcast warming up — only same-day markets have "
+                        "an intraday nowcast, and the daemon hasn't cached it yet"}), 503
+    ens = store.load_forecast_dist(con, station, date, "ensemble")
+    fc = (dist_cache.ensemble_from_payload(station, date, ens, CALIBRATION)
+          if ens is not None else None)
 
     buckets = []
     for m in sorted(markets, key=lambda x: x.threshold_c):
         buckets.append({
             "label": f"{m.threshold_c}°", "kind": m.bucket_kind, "degree": m.threshold_c,
-            "now": nowcast_mod.yes_probability(nc, m.bucket_kind, m.threshold_c),
+            "now": dist_cache.nowcast_prob(nc, m.bucket_kind, m.threshold_c),
             "ens": (yes_probability(fc, m.bucket_kind, m.threshold_c)
                     if fc is not None else None),
             "market": m.yes_price,
@@ -311,9 +299,10 @@ def nowcast():
     s = STATIONS[station]
     return jsonify({
         "event": slug, "city": s["city"], "station": station, "date": date,
-        "observed_max": nc.observed_max_c, "latest_ob": nc.latest_ob,
-        "remaining_hours": nc.n_remaining_hours, "floor_locked": nc.floor_locked,
-        "mean": nc.mean, "std": nc.std, "buckets": buckets,
+        "observed_max": nc["observed_max"], "latest_ob": nc["latest_ob"],
+        "remaining_hours": nc["remaining_hours"], "floor_locked": nc["floor_locked"],
+        "mean": nc["mean"], "std": nc["std"], "buckets": buckets,
+        "updated": nc["ts"],
     })
 
 

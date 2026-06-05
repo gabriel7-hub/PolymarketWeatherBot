@@ -121,8 +121,15 @@ def _build_scorer(station: str, date: str):
 
 
 def generate_signals(markets: list[TempMarket],
-                     min_edge: float = MIN_EDGE) -> list[Signal]:
-    """Fetch one forecast per (station, date) and score every bucket market."""
+                     min_edge: float = MIN_EDGE,
+                     scorer_for=None) -> list[Signal]:
+    """Score every bucket market against one forecast per (station, date).
+
+    By default each (station, date) is fetched live via `_build_scorer`. Callers
+    that have already fetched + persisted the forecasts (the paper daemon) can
+    inject a `scorer_for(station, date)` provider so no extra Open-Meteo calls
+    are made — this is what keeps the daemon the single upstream caller."""
+    builder = scorer_for or _build_scorer
     cache: dict[tuple[str, str], object] = {}
     signals: list[Signal] = []
 
@@ -134,7 +141,7 @@ def generate_signals(markets: list[TempMarket],
         key = (station, date)
         if key not in cache:
             try:
-                cache[key] = _build_scorer(station, date)
+                cache[key] = builder(station, date)
             except Exception as e:  # noqa: BLE001
                 print(f"  ! forecast failed for {station} {date}: {e}")
                 cache[key] = None

@@ -8,6 +8,7 @@ One file, stdlib only. Tables:
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -97,6 +98,20 @@ CREATE TABLE IF NOT EXISTS signals (
     edge        REAL,
     stake       REAL,
     taken       INTEGER
+);
+
+-- Forecast distributions the daemon computed, so the dashboard can render the
+-- Forecast/Nowcast panels WITHOUT calling Open-Meteo itself (the daemon is the
+-- single source of upstream calls). `payload` is JSON: for kind='ensemble' the
+-- raw member daily-maxes + mean/std; for kind='nowcast' the rounded-degree PMF
+-- + observed floor / collapse metrics.
+CREATE TABLE IF NOT EXISTS forecast_cache (
+    station  TEXT,
+    date     TEXT,
+    kind     TEXT,          -- 'ensemble' | 'nowcast'
+    ts       REAL,
+    payload  TEXT,
+    PRIMARY KEY (station, date, kind)
 );
 """
 
@@ -196,3 +211,28 @@ def get_meta(con: sqlite3.Connection, key: str, default: float = 0.0) -> float:
 def set_meta(con: sqlite3.Connection, key: str, value: float) -> None:
     con.execute("INSERT INTO meta VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=?",
                 (key, str(value), str(value)))
+
+
+def save_forecast_dist(con: sqlite3.Connection, station: str, date: str,
+                       kind: str, payload: dict, ts: float | None = None) -> None:
+    """Persist a forecast distribution (JSON) for the dashboard to read."""
+    con.execute(
+        """INSERT INTO forecast_cache (station, date, kind, ts, payload)
+           VALUES (?,?,?,?,?)
+           ON CONFLICT(station, date, kind) DO UPDATE SET
+             ts=excluded.ts, payload=excluded.payload""",
+        (station, date, kind, ts if ts is not None else time.time(),
+         json.dumps(payload)))
+    con.commit()
+
+
+def load_forecast_dist(con: sqlite3.Connection, station: str, date: str,
+                       kind: str) -> dict | None:
+    """Read back a persisted distribution; returns the payload with its `ts`,
+    or None if the daemon hasn't cached this (station, date, kind) yet."""
+    row = con.execute(
+        "SELECT ts, payload FROM forecast_cache WHERE station=? AND date=? AND kind=?",
+        (station, date, kind)).fetchone()
+    if not row:
+        return None
+    return {"ts": row["ts"], **json.loads(row["payload"])}

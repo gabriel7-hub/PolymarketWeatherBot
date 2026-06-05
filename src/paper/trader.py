@@ -18,13 +18,17 @@ from ..config import MIN_EDGE
 from ..polymarket.gamma import fetch_open_temperature_events, parse_event
 from ..strategy.edge import generate_signals
 from .engine import PaperBroker
+from .forecast_cache import refresh_forecast_cache, cache_scorer
 
 
 def tick(broker: PaperBroker) -> None:
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     events = fetch_open_temperature_events()
     markets = [m for ev in events for m in parse_event(ev)]
-    signals = generate_signals(markets)
+    # Single upstream call site: fetch + persist forecasts here, then score the
+    # signals from those same objects (the dashboard reads the persisted copies).
+    scorers = refresh_forecast_cache(broker.con, markets)
+    signals = generate_signals(markets, scorer_for=cache_scorer(scorers))
 
     broker.prefetch_books([s.token_id for s in signals])   # for depth-aware fills
     taken = set()

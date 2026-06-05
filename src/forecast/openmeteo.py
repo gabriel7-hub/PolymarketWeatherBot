@@ -7,6 +7,7 @@ of member daily-maxes as the predictive distribution.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -16,6 +17,35 @@ ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 # Models with hourly temperature ensemble members available on Open-Meteo.
 MODELS = "gfs_seamless,icon_seamless,ecmwf_ifs025"
+
+# Open-Meteo's free tier rate-limits (HTTP 429) per minute/hour/day. A handful
+# of concurrent dashboard requests + the scan daemon can trip the per-minute
+# limit, so retry transient 429/5xx with backoff (honouring Retry-After) rather
+# than failing the whole forecast.
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+def _get(url: str, params: dict, *, timeout: int = 30,
+         retries: int = 4, backoff: float = 2.0) -> requests.Response:
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            if r.status_code in _RETRY_STATUS and attempt < retries - 1:
+                wait = float(r.headers.get("Retry-After") or backoff * (2 ** attempt))
+                time.sleep(min(wait, 30.0))
+                continue
+            r.raise_for_status()
+            return r
+        except requests.RequestException as e:  # network blips / raise_for_status
+            last_exc = e
+            if attempt < retries - 1:
+                time.sleep(backoff * (2 ** attempt))
+                continue
+            raise
+    if last_exc:  # pragma: no cover - defensive
+        raise last_exc
+    raise RuntimeError(f"request to {url} failed without an exception")
 
 # Default extra uncertainty (°C) added in quadrature to ensemble spread.
 # Overridden per-station once calibration data exists.
@@ -50,18 +80,16 @@ def fetch_hourly_members(lat: float, lon: float, date: str, tz: str,
     distribution and the Tier-3 intraday nowcaster (which needs to split the day
     into observed-so-far vs remaining hours).
     """
-    r = requests.get(
+    r = _get(
         ENSEMBLE_URL,
-        params={
+        {
             "latitude": lat, "longitude": lon,
             "hourly": "temperature_2m",
             "models": models,
             "timezone": tz,
             "start_date": date, "end_date": date,
         },
-        timeout=30,
     )
-    r.raise_for_status()
     hourly = r.json()["hourly"]
     times = list(hourly["time"])
     # Every member series is keyed temperature_2m, temperature_2m_member01, ...
@@ -102,14 +130,12 @@ def fetch_actual_max(lat: float, lon: float, date: str, tz: str) -> float | None
     we have no trade.
     """
     try:
-        r = requests.get(
+        r = _get(
             ARCHIVE_URL,
-            params={"latitude": lat, "longitude": lon,
-                    "daily": "temperature_2m_max", "timezone": tz,
-                    "start_date": date, "end_date": date},
-            timeout=30,
+            {"latitude": lat, "longitude": lon,
+             "daily": "temperature_2m_max", "timezone": tz,
+             "start_date": date, "end_date": date},
         )
-        r.raise_for_status()
         vals = r.json().get("daily", {}).get("temperature_2m_max", [])
         return float(vals[0]) if vals and vals[0] is not None else None
     except Exception:  # noqa: BLE001
