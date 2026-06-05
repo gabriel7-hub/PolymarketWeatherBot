@@ -46,6 +46,31 @@ def best_bid(book: dict | None) -> tuple[float, float] | None:
     return float(b["price"]), float(b["size"])
 
 
+def walk_asks(book: dict | None, limit_price: float, budget_usdc: float
+              ) -> tuple[float, float, float]:
+    """Simulate a marketable BUY: spend up to `budget_usdc`, taking asks priced
+    at or below `limit_price`, cheapest first. Returns (shares, avg_price, cost).
+
+    This is what makes a paper fill realistic — you cross the spread and eat depth
+    rather than magically filling the whole size at the top-of-book quote. Returns
+    (0, 0, 0) if nothing is takeable within the limit."""
+    asks = sorted(((float(a["price"]), float(a["size"]))
+                   for a in (book or {}).get("asks") or []), key=lambda x: x[0])
+    shares = cost = 0.0
+    remaining = budget_usdc
+    for price, size in asks:
+        if price > limit_price + 1e-9 or remaining <= 1e-9:
+            break
+        take = min(size, remaining / price)       # shares we can afford at this level
+        if take <= 0:
+            break
+        shares += take
+        cost += take * price
+        remaining -= take * price
+    avg = cost / shares if shares > 0 else 0.0
+    return round(shares, 4), round(avg, 5), round(cost, 4)
+
+
 def _client():
     """Lazily build a py-clob-client. Imported here so the rest of the bot runs
     without the trading dependency installed."""

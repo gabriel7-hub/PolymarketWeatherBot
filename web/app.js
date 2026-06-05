@@ -129,8 +129,10 @@ function renderPositions(rows) {
   document.getElementById("pos-count").textContent = `${rows.length} held`;
   const tb = document.querySelector("#positions tbody");
   tb.innerHTML = "";
-  if (!rows.length) { tb.innerHTML = `<tr><td colspan="8" class="empty">No open positions</td></tr>`; return; }
+  if (!rows.length) { tb.innerHTML = `<tr><td colspan="9" class="empty">No open positions</td></tr>`; return; }
   for (const r of rows) {
+    const slip = r.slippage == null ? "—" :
+      `<span class="${r.slippage > 0 ? "neg" : r.slippage < 0 ? "pos" : ""}">${r.slippage > 0 ? "+" : ""}${(r.slippage * 100).toFixed(1)}¢</span>`;
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td class="l mkt" title="${r.question}">${shortQ(r.question)}</td>
@@ -138,6 +140,7 @@ function renderPositions(rows) {
       <td><span class="tag ${r.side.toLowerCase()}">${r.side}</span></td>
       <td class="r">${r.entry_price.toFixed(3)}</td>
       <td class="r">${r.mark_price.toFixed(3)}</td>
+      <td class="r">${slip}</td>
       <td class="r">${pct(r.model_prob, 0)}</td>
       <td class="r">${(r.edge * 100).toFixed(1)}%</td>
       <td class="r ${signClass(r.pnl)}">${fmtUSD(r.pnl)}</td>`;
@@ -272,6 +275,7 @@ function renderAlmanac(s) {
     ["Forecast Edge", "on", strat.forecast_edge],
     ["Nowcast", "on", strat.nowcast],
     ["Corr-Kelly", "on", strat.corr_kelly],
+    ["Depth Fills", "on", strat.depth_fills],
     ["Arb Exec", "on", strat.arb_execute],
     ["LP Quotes", "on", strat.lp_execute],
   ];
@@ -287,6 +291,7 @@ function renderAlmanac(s) {
     `<b>${s.stations}</b> stations · <b>${s.emos_fitted}</b> EMOS-calibrated · ` +
     `models <b>${(s.models || []).map((m) => m.split("_")[0].toUpperCase()).join(" · ")}</b> · ` +
     `min-edge <b>${pct(k.min_edge, 0)}</b> · <b>${(k.kelly_fraction * 100).toFixed(0)}%</b> Kelly · ` +
+    `<b>${((s.cash_buffer || 0) * 100).toFixed(0)}%</b> cash buffer · ` +
     `bankroll <b>${fmtUSD(k.bankroll, false)}</b> · <b>${s.forecasts_logged}</b> forecasts logged`;
 }
 
@@ -360,8 +365,22 @@ function drawNowcast(nc) {
 
 /* ---------------- Capital allocation ---------------- */
 function renderAllocation(ex) {
+  const slip = ex.avg_slippage == null ? "" :
+    ` · slip ${ex.avg_slippage > 0 ? "+" : ""}${(ex.avg_slippage * 100).toFixed(1)}¢`;
   document.getElementById("alloc-note").textContent =
-    `${fmtUSD(ex.deployed, false)} deployed · ${ex.n} lots`;
+    `${fmtUSD(ex.deployed, false)} deployed · ${ex.n} lots${slip}`;
+
+  // deployment gauge: filled = deployed, red mark = investable ceiling (after buffer)
+  const bankroll = ex.bankroll || 1;
+  const depPct = Math.min(100, (ex.deployed / bankroll) * 100);
+  const invPct = Math.min(100, (ex.investable / bankroll) * 100);
+  document.getElementById("gauge-deployed").style.width = depPct.toFixed(1) + "%";
+  document.getElementById("gauge-buffer").style.left = invPct.toFixed(1) + "%";
+  const overBuf = ex.deployed > ex.investable + 0.5;
+  document.getElementById("gauge-meta").innerHTML =
+    `<span><b>${fmtUSD(ex.deployed, false)}</b> deployed (${depPct.toFixed(0)}%)</span>` +
+    `<span class="${overBuf ? "neg" : ""}">ceiling <b>${fmtUSD(ex.investable, false)}</b> · ${((ex.cash_buffer || 0) * 100).toFixed(0)}% reserve` +
+    (ex.avg_fill_ratio != null ? ` · fill ${(ex.avg_fill_ratio * 100).toFixed(0)}%` : "") + `</span>`;
   // Yes/No split bar
   const side = document.getElementById("alloc-side");
   side.innerHTML = "";
@@ -417,6 +436,54 @@ function renderCalibration(rows) {
   }
 }
 
+/* ---------------- Resolution audit (source check) ---------------- */
+function drawAudit(a) {
+  const head = document.getElementById("audit-head");
+  const foot = document.getElementById("audit-foot");
+  const svg = document.getElementById("audit-chart");
+  svg.innerHTML = "";
+  if (!a || !a.n) {
+    document.getElementById("audit-note").textContent = "—";
+    head.innerHTML = `<span class="stat">no audit yet — run <b>scripts/resolution_audit.py</b></span>`;
+    foot.textContent = "Compares round(METAR daily max) vs the actual Polymarket resolution.";
+    return;
+  }
+  const up = a.updated ? new Date(a.updated * 1000).toLocaleDateString("en-US",
+    { month: "short", day: "numeric" }) : "—";
+  document.getElementById("audit-note").textContent = `n=${a.n} · ${up}`;
+  const mrCls = a.match_rate >= 0.8 ? "pos" : a.match_rate < 0.6 ? "neg" : "";
+  head.innerHTML =
+    `<span class="big ${mrCls}">${(a.match_rate * 100).toFixed(0)}%</span>` +
+    `<span class="stat">exact match<br><b>${a.matched}/${a.n}</b> events</span>` +
+    `<span class="stat">within ±1°C<br><b>${(a.within1_rate * 100).toFixed(0)}%</b></span>` +
+    `<span class="stat">mean |Δ|<br><b>${a.mean_abs_delta.toFixed(2)}°C</b></span>`;
+
+  // Δ (METAR − resolved) histogram, centered on 0
+  const hist = a.hist || [];
+  const W = svg.clientWidth, H = svg.clientHeight;
+  const m = { t: 12, r: 10, b: 26, l: 28 };
+  const hi = Math.max(...hist.map((h) => h.count), 1);
+  const py = (v) => m.t + (H - m.t - m.b) * (1 - v / hi);
+  const gw = (W - m.l - m.r) / hist.length;
+  const baseY = H - m.b;
+  svg.appendChild(el("line", { x1: m.l, y1: baseY, x2: W - m.r, y2: baseY, class: "grid-line" }));
+  hist.forEach((h, i) => {
+    const x = m.l + i * gw + gw * 0.2, w = gw * 0.6;
+    const good = h.delta === 0;
+    svg.appendChild(el("rect", { x, y: py(h.count), width: w, height: baseY - py(h.count),
+      fill: good ? "var(--gain)" : "var(--brass-soft)", opacity: good ? .9 : .8 }));
+    svg.appendChild(el("text", { x: x + w / 2, y: py(h.count) - 4, "text-anchor": "middle", class: "axis-label" }, h.count));
+    svg.appendChild(el("text", { x: x + w / 2, y: H - 9, "text-anchor": "middle", class: "axis-label" },
+      (h.delta > 0 ? "+" : "") + h.delta + "°"));
+  });
+  const v = a.match_rate >= 0.8 ? ["verdict-ok", "FAITHFUL — METAR tracks the resolution source"]
+    : a.match_rate < 0.6 ? ["verdict-bad", "SUSPECT — source mismatch; fix before trusting any edge"]
+    : ["verdict-mid", "MARGINAL — verify window / rounding / station"];
+  const ps = (a.per_station || []).map((p) =>
+    `${p.station} ${(p.match_rate * 100).toFixed(0)}%`).join(" · ");
+  foot.innerHTML = `<b class="${v[0]}">${v[1]}</b>` + (ps ? `<br>${ps}` : "");
+}
+
 /* ---------------- helpers ---------------- */
 function shortQ(q) {
   return q.replace("Will the highest temperature in ", "").replace("?", "");
@@ -458,10 +525,11 @@ async function refreshForecast() {
 /* ---------------- main loop ---------------- */
 async function refresh() {
   try {
-    const [s, eq, pos, fills, daily, status, exposure, cal] = await Promise.all([
+    const [s, eq, pos, fills, daily, status, exposure, cal, audit] = await Promise.all([
       get("/weatherbot/api/summary"), get("/weatherbot/api/equity"), get("/weatherbot/api/positions"),
       get("/weatherbot/api/fills"), get("/weatherbot/api/daily"),
       get("/weatherbot/api/status"), get("/weatherbot/api/exposure"), get("/weatherbot/api/calibration"),
+      get("/weatherbot/api/resolution_audit"),
     ]);
     renderPlates(s);
     renderAlmanac(status);
@@ -471,6 +539,7 @@ async function refresh() {
     drawDaily(daily);
     renderAllocation(exposure);
     renderCalibration(cal);
+    drawAudit(audit);
 
     const st = document.getElementById("status");
     const live = s.is_live;

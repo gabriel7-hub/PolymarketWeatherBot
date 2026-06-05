@@ -12,9 +12,10 @@ import time
 
 import requests
 
-from ..config import GAMMA_API, STATIONS
+from ..config import GAMMA_API, STATIONS, CASH_BUFFER, PAPER_DEPTH
 from ..forecast.openmeteo import fetch_actual_max
 from ..forecast.metar import fetch_station_daily_max
+from ..polymarket import clob
 from ..strategy.edge import Signal
 from .. import notify
 from . import store
@@ -52,6 +53,7 @@ def _market_state(condition_id: str) -> dict | None:
 class PaperBroker:
     def __init__(self):
         self.con = store.connect()
+        self._books: dict[str, dict] = {}
         healed = store.backfill_fill_metadata(self.con)
         if healed:
             print(f"  backfilled forecast metadata on {healed} legacy fill(s)")
@@ -63,25 +65,55 @@ class PaperBroker:
         ).fetchone()
         return row is not None
 
+    def prefetch_books(self, token_ids: list[str]) -> None:
+        """Batch-fetch the order books we're about to fill against (one call)."""
+        self._books = {}
+        if not (PAPER_DEPTH and token_ids):
+            return
+        try:
+            self._books = clob.get_books(list(set(token_ids)))
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! book prefetch failed ({e}); using quoted-price fills")
+
+    def _simulate_fill(self, sig: Signal, budget: float) -> tuple[float, float, float]:
+        """(shares, avg_price, cost) for spending `budget` on sig.token_id.
+        Walks the live book when available; else fills the whole budget at quote."""
+        book = self._books.get(sig.token_id)
+        if PAPER_DEPTH and book is not None:
+            # allow a couple cents of slippage past the quote we sized on
+            shares, avg, cost = clob.walk_asks(book, sig.price + 0.02, budget)
+            if shares > 0:
+                return shares, avg, cost
+        # fallback: quoted-price fill (no depth info)
+        return round(budget / sig.price, 2), sig.price, budget
+
     def execute(self, sig: Signal) -> bool:
-        """Fill a signal at its quoted price if we have cash and aren't already in."""
+        """Fill a signal — depth-aware against the live book — if we have cash
+        (above the reserve buffer) and aren't already in this token."""
         if self.already_open(sig.token_id) or sig.stake <= 0:
             return False
         cash = store.get_meta(self.con, "cash")
-        cost = min(sig.stake, cash)
-        if cost < 1:
+        start = store.get_meta(self.con, "starting_cash")
+        floor = CASH_BUFFER * start                     # never spend below the reserve
+        budget = min(sig.stake, cash - floor)
+        if budget < 1:
             return False
-        shares = round(cost / sig.price, 2)
+        shares, avg_price, cost = self._simulate_fill(sig, budget)
+        if shares <= 0 or cost < 1:
+            return False
+        slippage = round(avg_price - sig.price, 5)
+        fill_ratio = round(cost / sig.stake, 4) if sig.stake else 1.0
         m = sig.market
         self.con.execute(
             """INSERT INTO fills (ts,event_slug,market_slug,question,city,condition_id,
                token_id,side,entry_price,shares,cost,model_prob,edge,end_date,status,
-               mark_price,pnl,station,fc_date,fc_mean,fc_std)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open', ?, 0, ?,?,?,?)""",
+               mark_price,pnl,station,fc_date,fc_mean,fc_std,quote_price,slippage,fill_ratio)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open', ?, 0, ?,?,?,?,?,?,?)""",
             (time.time(), m.event_slug, m.market_slug, m.question, _city(m.question),
-             m.condition_id, sig.token_id, sig.side, sig.price, shares, cost,
-             sig.model_prob, sig.edge, m.end_date, sig.price,
-             sig.station, sig.date, sig.fc_mean, sig.fc_std))
+             m.condition_id, sig.token_id, sig.side, avg_price, shares, cost,
+             sig.model_prob, sig.edge, m.end_date, avg_price,
+             sig.station, sig.date, sig.fc_mean, sig.fc_std,
+             sig.price, slippage, fill_ratio))
         store.set_meta(self.con, "cash", cash - cost)
         self.con.commit()
         return True

@@ -26,6 +26,7 @@ def tick(broker: PaperBroker) -> None:
     markets = [m for ev in events for m in parse_event(ev)]
     signals = generate_signals(markets)
 
+    broker.prefetch_books([s.token_id for s in signals])   # for depth-aware fills
     taken = set()
     for s in signals:
         broker.log_forecast(s)          # record every forecast for calibration

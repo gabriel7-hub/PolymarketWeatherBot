@@ -43,7 +43,24 @@ CREATE TABLE IF NOT EXISTS fills (
     station      TEXT,
     fc_date      TEXT,
     fc_mean      REAL,          -- calibrated ensemble mean max-temp at entry
-    fc_std       REAL
+    fc_std       REAL,
+    quote_price  REAL,          -- top-of-book quote we sized against
+    slippage     REAL,          -- realized avg fill price - quote (depth-aware fills)
+    fill_ratio   REAL           -- filled cost / requested cost (1.0 = full fill)
+);
+
+-- Resolution-source audit: did round(METAR daily max) == the actual Polymarket
+-- resolution? The whole edge rests on this matching; this table records it.
+CREATE TABLE IF NOT EXISTS resolution_audit (
+    station      TEXT,
+    date         TEXT,
+    resolved_deg INTEGER,       -- winning whole-degree per Polymarket
+    metar_max    REAL,          -- our station daily max (IEM ASOS)
+    metar_deg    INTEGER,       -- round(metar_max)
+    delta        INTEGER,       -- metar_deg - resolved_deg
+    matched      INTEGER,       -- 1 if metar_deg == resolved_deg
+    ts           REAL,
+    PRIMARY KEY (station, date)
 );
 
 -- One row per (station, date) we forecast, plus the realized max once known.
@@ -98,7 +115,9 @@ def _migrate(con: sqlite3.Connection) -> None:
     """Add columns introduced after a DB was first created."""
     cols = {r["name"] for r in con.execute("PRAGMA table_info(fills)")}
     for col, decl in (("station", "TEXT"), ("fc_date", "TEXT"),
-                      ("fc_mean", "REAL"), ("fc_std", "REAL")):
+                      ("fc_mean", "REAL"), ("fc_std", "REAL"),
+                      ("quote_price", "REAL"), ("slippage", "REAL"),
+                      ("fill_ratio", "REAL")):
         if col not in cols:
             con.execute(f"ALTER TABLE fills ADD COLUMN {col} {decl}")
     con.commit()
@@ -150,6 +169,23 @@ def backfill_fill_metadata(con: sqlite3.Connection) -> int:
              AND station IS NOT NULL AND fc_date IS NOT NULL""")
     con.commit()
     return updated
+
+
+def save_audit(con: sqlite3.Connection, rows: list[dict]) -> int:
+    """Upsert resolution-audit rows (one per resolved station/date)."""
+    for r in rows:
+        con.execute(
+            """INSERT INTO resolution_audit
+               (station,date,resolved_deg,metar_max,metar_deg,delta,matched,ts)
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(station,date) DO UPDATE SET
+                 resolved_deg=excluded.resolved_deg, metar_max=excluded.metar_max,
+                 metar_deg=excluded.metar_deg, delta=excluded.delta,
+                 matched=excluded.matched, ts=excluded.ts""",
+            (r["station"], r["date"], r["resolved_deg"], r["metar_max"],
+             r["metar_deg"], r["delta"], r["matched"], time.time()))
+    con.commit()
+    return len(rows)
 
 
 def get_meta(con: sqlite3.Connection, key: str, default: float = 0.0) -> float:

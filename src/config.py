@@ -22,6 +22,14 @@ MAX_STAKE_PER_MARKET = _f("MAX_STAKE_PER_MARKET", 100)
 BANKROLL = _f("BANKROLL", 2000)
 DRY_RUN = os.getenv("DRY_RUN", "1") == "1"
 
+# Fraction of bankroll always kept in cash (never deployed). A reserve buffer so
+# the book can't drift to 100%-invested with no dry powder.
+CASH_BUFFER = _f("CASH_BUFFER", 0.10)
+# Paper fills walk the live order book (depth + slippage) instead of magically
+# filling the whole size at the quoted price. Falls back to quoted-price fills if
+# the book is unavailable.
+PAPER_DEPTH = os.getenv("PAPER_DEPTH", "1") == "1"
+
 # Tradability filters. Markets within a few hours of resolution are effectively
 # decided (prices pinned to 0.001/0.999, no liquidity), so forecast "edge" there
 # is fake. Only trade a sane price band and a minimum horizon.

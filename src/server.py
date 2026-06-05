@@ -17,7 +17,9 @@ from flask import Flask, jsonify, request, send_from_directory
 from .config import (ROOT, STATIONS, BANKROLL, CALIBRATION, DRY_RUN, NOWCAST,
                      CORR_KELLY, CORR_KELLY_RHO, MIN_EDGE, KELLY_FRACTION,
                      MAX_STAKE_PER_MARKET, MIN_PRICE, MAX_PRICE,
-                     MIN_HOURS_TO_RESOLVE, ARB_EXECUTE, LP_EXECUTE)
+                     MIN_HOURS_TO_RESOLVE, ARB_EXECUTE, LP_EXECUTE,
+                     CASH_BUFFER, PAPER_DEPTH)
+from .analysis.resolution_audit import summarize as summarize_audit
 from .paper import store
 from .polymarket.gamma import fetch_open_temperature_events, parse_event
 from .forecast.openmeteo import fetch_max_temp_distribution, MODELS
@@ -166,9 +168,11 @@ def status():
             "forecast_edge": True,
             "nowcast": NOWCAST,
             "corr_kelly": CORR_KELLY,
+            "depth_fills": PAPER_DEPTH,
             "arb_execute": ARB_EXECUTE,
             "lp_execute": LP_EXECUTE,
         },
+        "cash_buffer": CASH_BUFFER,
         "knobs": {
             "min_edge": MIN_EDGE, "kelly_fraction": KELLY_FRACTION,
             "max_stake": MAX_STAKE_PER_MARKET, "bankroll": BANKROLL,
@@ -220,13 +224,38 @@ def exposure():
         value += r["shares"] * r["mark_price"]
         edge_sum += r["edge"] or 0.0
     n = len(rows)
+    # slippage / fill-quality (depth-aware fills); legacy rows may be NULL
+    sl = con.execute("SELECT slippage, fill_ratio FROM fills "
+                     "WHERE slippage IS NOT NULL").fetchall()
+    avg_slip = sum(r["slippage"] for r in sl) / len(sl) if sl else None
+    avg_fill = sum(r["fill_ratio"] for r in sl) / len(sl) if sl else None
+    start = store.get_meta(con, "starting_cash", BANKROLL)
     return jsonify({
         "n": n, "deployed": round(deployed, 2), "value": round(value, 2),
         "avg_edge": (edge_sum / n) if n else None,
         "by_city": [{"city": c, "cost": round(v, 2)}
                     for c, v in sorted(by_city.items(), key=lambda x: -x[1])],
         "by_side": by_side,
+        "avg_slippage": avg_slip, "avg_fill_ratio": avg_fill,
+        "bankroll": start, "cash_buffer": CASH_BUFFER,
+        "investable": round(start * (1.0 - CASH_BUFFER), 2),
+        "depth_fills": PAPER_DEPTH,
     })
+
+
+@app.get("/api/resolution_audit")
+def resolution_audit():
+    """Tier-0 validation: does round(METAR daily max) match the actual Polymarket
+    resolution? Reads the table populated by scripts/resolution_audit.py."""
+    con = db()
+    rows = [dict(r) for r in con.execute(
+        "SELECT station, date, resolved_deg, metar_max, metar_deg, delta, matched, ts "
+        "FROM resolution_audit").fetchall()]
+    out = summarize_audit(rows)
+    last = max((r["ts"] for r in rows if r.get("ts")), default=None)
+    out["updated"] = last
+    out["recent"] = sorted(rows, key=lambda r: r["date"], reverse=True)[:8]
+    return jsonify(out)
 
 
 _nc_cache: dict[tuple, tuple[float, dict]] = {}

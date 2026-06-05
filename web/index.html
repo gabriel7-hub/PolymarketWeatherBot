@@ -54,8 +54,8 @@
         <table class="ledger" id="positions">
           <thead><tr>
             <th class="l">Market</th><th class="l">City</th><th>Side</th>
-            <th class="r">Entry</th><th class="r">Mark</th><th class="r">Model P</th>
-            <th class="r">Edge</th><th class="r">P&amp;L</th>
+            <th class="r">Entry</th><th class="r">Mark</th><th class="r">Slip</th>
+            <th class="r">Model P</th><th class="r">Edge</th><th class="r">P&amp;L</th>
           </tr></thead>
           <tbody></tbody>
         </table>
@@ -100,6 +100,11 @@
     <!-- Capital allocation / exposure -->
     <section class="panel">
       <div class="panel-head"><h2>Capital Allocation</h2><span class="panel-note" id="alloc-note">—</span></div>
+      <div class="gauge-wrap">
+        <div class="gauge"><div class="gauge-fill" id="gauge-deployed"></div>
+          <div class="gauge-mark" id="gauge-buffer"></div></div>
+        <div class="gauge-meta" id="gauge-meta">—</div>
+      </div>
       <div class="alloc-side" id="alloc-side"></div>
       <div class="chart-wrap short"><svg id="alloc-chart" preserveAspectRatio="none"></svg></div>
     </section>
@@ -127,23 +132,36 @@
     </section>
   </div>
 
-  <!-- Tier 2: per-station EMOS / bias calibration -->
-  <section class="panel">
-    <div class="panel-head">
-      <h2>Station Calibration <span class="badge">Tier 2 · EMOS</span></h2>
-      <span class="panel-note" id="cal-note">—</span>
-    </div>
-    <div class="table-wrap">
-      <table class="ledger" id="calibration">
-        <thead><tr>
-          <th class="l">Station</th><th class="l">City</th>
-          <th class="r">Bias °C</th><th class="r">a</th><th class="r">b</th>
-          <th class="r">c</th><th class="r">d</th><th>EMOS</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </section>
+  <div class="two-col">
+    <!-- Tier 0: resolution-source fidelity audit -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Resolution Audit <span class="badge">Source Check</span></h2>
+        <span class="panel-note" id="audit-note">—</span>
+      </div>
+      <div class="audit-head" id="audit-head">—</div>
+      <div class="chart-wrap short"><svg id="audit-chart" preserveAspectRatio="none"></svg></div>
+      <div class="audit-foot" id="audit-foot">—</div>
+    </section>
+
+    <!-- Tier 2: per-station EMOS / bias calibration -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Station Calibration <span class="badge">Tier 2 · EMOS</span></h2>
+        <span class="panel-note" id="cal-note">—</span>
+      </div>
+      <div class="table-wrap">
+        <table class="ledger" id="calibration">
+          <thead><tr>
+            <th class="l">Stn</th><th class="l">City</th>
+            <th class="r">Bias</th><th class="r">a</th><th class="r">b</th>
+            <th class="r">c</th><th class="r">d</th><th>EMOS</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
 
   <footer class="colophon">
     Set in Fraunces &amp; IBM&nbsp;Plex&nbsp;Mono · Forecasts from GFS · ICON · ECMWF ensembles via Open-Meteo ·

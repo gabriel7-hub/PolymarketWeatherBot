@@ -6,12 +6,13 @@ from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
 from ..config import (MIN_EDGE, STATIONS, MIN_PRICE, MAX_PRICE,
-                      MIN_HOURS_TO_RESOLVE, CALIBRATION, NOWCAST)
+                      MIN_HOURS_TO_RESOLVE, CALIBRATION, NOWCAST,
+                      CORR_KELLY, CASH_BUFFER, BANKROLL)
 from ..forecast.openmeteo import fetch_max_temp_distribution, MaxTempForecast
 from ..forecast.model import yes_probability, apply_calibration
 from ..forecast import nowcast as nowcast_mod
 from ..polymarket.gamma import TempMarket
-from .sizing import stake_usdc
+from .sizing import stake_usdc, correlated_stakes
 
 
 @dataclass
@@ -145,4 +146,20 @@ def generate_signals(markets: list[TempMarket],
             signals.append(sig)
 
     signals.sort(key=lambda s: s.edge, reverse=True)
+    _apply_portfolio_sizing(signals)
     return signals
+
+
+def _apply_portfolio_sizing(signals: list[Signal]) -> None:
+    """Re-size the whole book together when CORR_KELLY is on: correlated bets
+    (one heat wave moves many cities) get shrunk via covariance Kelly, and the
+    total is held under the cash-buffer-adjusted bankroll. Mutates stakes in
+    place. No-op (independent per-bet Kelly stands) when CORR_KELLY is off."""
+    if not (CORR_KELLY and len(signals) > 1):
+        return
+    probs = [s.model_prob if s.side == "Yes" else 1.0 - s.model_prob for s in signals]
+    prices = [s.price for s in signals]
+    investable = BANKROLL * (1.0 - CASH_BUFFER)
+    stakes = correlated_stakes(probs, prices, bankroll=investable)
+    for s, st in zip(signals, stakes):
+        s.stake = st
