@@ -18,6 +18,7 @@ from ..config import MIN_EDGE, PEER_SIGNAL, ARB_SCAN, ARB_MIN_PROFIT
 from ..polymarket.gamma import fetch_open_temperature_events, parse_event
 from ..strategy.edge import generate_signals
 from ..strategy import peer_signal, arbitrage
+from .. import notify
 from .engine import PaperBroker
 from .forecast_cache import refresh_forecast_cache, cache_scorer
 from . import store
@@ -81,11 +82,18 @@ def main() -> None:
     if args.loop <= 0:
         tick(broker)
         return
+    consecutive_errors = 0
     while True:
+        broker.snapshot()          # heartbeat: equity/marks persist even if tick errors
         try:
             tick(broker)
+            if consecutive_errors:
+                notify.notify_tick_recovered(consecutive_errors)
+            consecutive_errors = 0
         except Exception as e:  # noqa: BLE001
-            print(f"tick error: {e}")
+            consecutive_errors += 1
+            print(f"tick error #{consecutive_errors}: {e}")
+            notify.notify_tick_error(e, consecutive_errors)
         time.sleep(args.loop)
 
 

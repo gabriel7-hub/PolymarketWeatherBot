@@ -28,6 +28,30 @@ def send(text: str) -> bool:
         return False
 
 
+def notify_tick_error(error: Exception, consecutive: int) -> bool:
+    """Alert when a daemon tick fails. Only fires on the 1st, 3rd, and every 5th failure
+    after that — avoids a flood when the API is down for hours."""
+    if consecutive not in (1, 3) and consecutive % 5 != 0:
+        return False
+    text = (
+        f"⚠️ *Daemon tick error* (#{consecutive} in a row)\n"
+        f"`{type(error).__name__}: {error}`\n"
+        f"_Equity chart will freeze until the next successful tick._"
+    )
+    return send(text)
+
+
+def notify_tick_recovered(consecutive_was: int) -> bool:
+    """Alert when the daemon recovers after one or more failed ticks."""
+    if consecutive_was < 1:
+        return False
+    text = (
+        f"✅ *Daemon recovered* after {consecutive_was} failed tick(s)\n"
+        f"_Equity chart is updating again._"
+    )
+    return send(text)
+
+
 def notify_settlement(fill: dict, balance: dict) -> bool:
     """Format and send a closed-trade result.
 
