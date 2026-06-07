@@ -191,14 +191,50 @@ function drawDaily(data) {
   const py = (v) => m.t + (H - m.t - m.b) * (1 - (v - lo) / (hi - lo));
   const bw = (W - m.l - m.r) / rows.length;
   svg.appendChild(el("line", { x1: m.l, y1: py(0), x2: W - m.r, y2: py(0), class: "grid-line" }));
-  rows.forEach((d, i) => {
+  let cum = 0;
+  const bars = rows.map((d, i) => {
+    cum += d.pnl;
     const x = m.l + i * bw + bw * 0.18, w = bw * 0.64;
     const y = py(Math.max(0, d.pnl)), h = Math.abs(py(d.pnl) - py(0));
-    svg.appendChild(el("rect", { x, y, width: w, height: Math.max(h, 1),
-      fill: d.pnl >= 0 ? "var(--gain)" : "var(--loss)", opacity: .85 }));
+    const bar = el("rect", { x, y, width: w, height: Math.max(h, 1),
+      fill: d.pnl >= 0 ? "var(--gain)" : "var(--loss)", opacity: .85 });
+    svg.appendChild(bar);
     svg.appendChild(el("text", { x: x + w / 2, y: H - 8, "text-anchor": "middle", class: "axis-label" },
       d.day.slice(5)));
+    return { d, bar, cum, cx: x + w / 2 };
   });
+
+  // ---- interactivity: hover a bar -> highlight it + tooltip (day P&L, total) --
+  const hit = el("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b,
+    fill: "transparent", style: "cursor:pointer" });
+  let activeIdx = -1;
+  const clear = () => {
+    if (activeIdx >= 0) bars[activeIdx].bar.setAttribute("opacity", ".85");
+    activeIdx = -1; tip().style.display = "none";
+  };
+  hit.addEventListener("mousemove", (e) => {
+    const rect = svg.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    let bi = 0, best = Infinity;
+    bars.forEach((b, i) => { const dd = Math.abs(b.cx - mx); if (dd < best) { best = dd; bi = i; } });
+    if (bi !== activeIdx) {
+      if (activeIdx >= 0) bars[activeIdx].bar.setAttribute("opacity", ".85");
+      bars[bi].bar.setAttribute("opacity", "1"); activeIdx = bi;
+    }
+    const b = bars[bi];
+    const dow = new Date(b.d.day + "T00:00:00Z").toLocaleDateString("en-US",
+      { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+    tip().innerHTML =
+      `<b>${dow}</b>` +
+      `<span class="row edge ${b.d.pnl >= 0 ? "pos" : "neg"}">Realized<em>${fmtUSD(b.d.pnl)}</em></span>` +
+      `<span class="row">Running total<em>${fmtUSD(b.cum)}</em></span>`;
+    const tp = tip(); tp.style.display = "block";
+    const tw = tp.offsetWidth, x2 = e.clientX + 16;
+    tp.style.left = (x2 + tw > window.innerWidth ? e.clientX - tw - 16 : x2) + "px";
+    tp.style.top = (e.clientY + 16) + "px";
+  });
+  hit.addEventListener("mouseleave", clear);
+  svg.appendChild(hit);
 }
 
 /* ---------------- Forecast vs market grouped bars ---------------- */

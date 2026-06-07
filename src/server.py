@@ -41,9 +41,16 @@ def summary():
     start = store.get_meta(con, "starting_cash", BANKROLL)
     cash = store.get_meta(con, "cash", BANKROLL)
     eq = con.execute("SELECT * FROM equity ORDER BY ts DESC LIMIT 1").fetchone()
-    equity = eq["equity"] if eq else cash
-    realized = eq["realized"] if eq else 0.0
-    unrealized = eq["unrealized"] if eq else 0.0
+    # Realized/unrealized are computed straight from fills (not the equity
+    # snapshot, which is throttled and so lags settlement): realized = Σ pnl of
+    # settled lots, unrealized = Σ live pnl of open lots. This is the same
+    # source of truth as wins/Brier below, so the plates can't disagree. Equity
+    # is then start + realized + unrealized, so all four plates reconcile exactly.
+    realized = con.execute(
+        "SELECT COALESCE(SUM(pnl),0) s FROM fills WHERE status='settled'").fetchone()["s"]
+    unrealized = con.execute(
+        "SELECT COALESCE(SUM(pnl),0) s FROM fills WHERE status='open'").fetchone()["s"]
+    equity = start + realized + unrealized
     settled = con.execute(
         "SELECT pnl, side, resolved_yes FROM fills WHERE status='settled'").fetchall()
     wins = sum(1 for s in settled if s["pnl"] > 0)
