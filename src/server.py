@@ -141,12 +141,17 @@ def daily():
     """Realized PnL grouped by settlement day + end-of-day equity."""
     con = db()
     rows = con.execute(
-        "SELECT ts, pnl FROM fills WHERE status='settled'").fetchall()
+        "SELECT ts, end_date, pnl FROM fills WHERE status='settled'").fetchall()
     def day_of(ts):
         return dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%Y-%m-%d")
     by_day = defaultdict(float)
     for r in rows:
-        by_day[day_of(r["ts"])] += r["pnl"]
+        # Attribute realized P&L to the day the market *resolved* (end_date),
+        # not the day we entered the trade. Daily temp markets resolve next-day,
+        # so grouping by entry ts smears a day's settlements onto the prior day.
+        # Fall back to the entry day only for legacy rows missing end_date.
+        day = (r["end_date"] or "")[:10] or day_of(r["ts"])
+        by_day[day] += r["pnl"]
     eq = con.execute("SELECT ts, equity FROM equity ORDER BY ts ASC").fetchall()
     eq_by_day = {}
     for r in eq:
