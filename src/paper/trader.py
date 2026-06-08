@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import time
 
-from ..config import MIN_EDGE, PEER_SIGNAL, ARB_SCAN, ARB_MIN_PROFIT
+from ..config import MIN_EDGE, PEER_SIGNAL, ARB_SCAN, ARB_MIN_PROFIT, BANKROLL
 from ..polymarket.gamma import fetch_open_temperature_events, parse_event
 from ..strategy.edge import generate_signals
 from ..strategy import peer_signal, arbitrage
@@ -53,8 +53,14 @@ def tick(broker: PaperBroker) -> None:
         except Exception as e:  # noqa: BLE001
             print(f"  ! peer signal fetch failed ({e}); continuing without it")
 
+    # Size against live equity so realized gains compound into bigger/more
+    # positions and a drawdown shrinks them — capital that grows, not bleeds.
+    last_eq = broker.con.execute(
+        "SELECT equity FROM equity ORDER BY ts DESC LIMIT 1").fetchone()
+    bankroll = last_eq["equity"] if last_eq else store.get_meta(
+        broker.con, "starting_cash", BANKROLL)
     signals = generate_signals(markets, scorer_for=cache_scorer(scorers),
-                               peer_book=peer_book)
+                               peer_book=peer_book, bankroll=bankroll)
     n_arb = _scan_arb(broker, events) if ARB_SCAN else 0
 
     broker.prefetch_books([s.token_id for s in signals])   # for depth-aware fills

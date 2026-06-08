@@ -5,7 +5,17 @@ from __future__ import annotations
 import numpy as np
 
 from ..config import (BANKROLL, CORR_KELLY_RHO, KELLY_FRACTION,
-                      MAX_STAKE_PER_MARKET)
+                      MAX_STAKE_PER_MARKET, MAX_STAKE_FRACTION)
+
+
+def market_cap(bankroll: float = BANKROLL) -> float:
+    """Per-market stake ceiling: the smaller of the absolute cap and a fraction
+    of live equity. Compounds as the book grows and shrinks in a drawdown, so a
+    single bet can't blow up the book regardless of bankroll size."""
+    cap = MAX_STAKE_PER_MARKET
+    if MAX_STAKE_FRACTION > 0:
+        cap = min(cap, MAX_STAKE_FRACTION * bankroll)
+    return cap
 
 
 def kelly_fraction(p: float, price: float) -> float:
@@ -24,7 +34,9 @@ def kelly_fraction(p: float, price: float) -> float:
 def stake_usdc(p: float, price: float,
                bankroll: float = BANKROLL,
                fraction: float = KELLY_FRACTION,
-               cap: float = MAX_STAKE_PER_MARKET) -> float:
+               cap: float | None = None) -> float:
+    if cap is None:
+        cap = market_cap(bankroll)
     f = kelly_fraction(p, price) * fraction
     return round(min(f * bankroll, cap), 2)
 
@@ -74,10 +86,12 @@ def correlation_kelly(probs, prices, corr=None,
 def correlated_stakes(probs, prices, corr=None,
                       bankroll: float = BANKROLL,
                       fraction: float = KELLY_FRACTION,
-                      cap: float = MAX_STAKE_PER_MARKET,
+                      cap: float | None = None,
                       rho: float = CORR_KELLY_RHO) -> list[float]:
     """USDC stakes for simultaneous correlated bets: fractional, covariance-shrunk
     Kelly, with a total-bankroll guard and per-market cap."""
+    if cap is None:
+        cap = market_cap(bankroll)
     f = correlation_kelly(probs, prices, corr, rho) * fraction
     total = f.sum()
     if total > 1.0:                        # never stake more than the bankroll

@@ -100,7 +100,8 @@ def is_tradable(m: TempMarket) -> bool:
 
 
 def evaluate_market(m: TempMarket, fc, min_edge: float = MIN_EDGE,
-                    peer_book: dict | None = None) -> Signal | None:
+                    peer_book: dict | None = None,
+                    bankroll: float = BANKROLL) -> Signal | None:
     if not _horizon_ok(m):
         return None
     p_yes = _p_yes(fc, m.bucket_kind, m.threshold_c)
@@ -120,7 +121,8 @@ def evaluate_market(m: TempMarket, fc, min_edge: float = MIN_EDGE,
             and 0.0 < m.no_price <= NO_HARVEST_MAX_PRICE):
         no_edge = (1.0 - p_yes) - m.no_price
         if no_edge >= NO_HARVEST_MIN_EDGE:
-            stake = min(stake_usdc(1.0 - p_yes, m.no_price), NO_HARVEST_STAKE)
+            stake = min(stake_usdc(1.0 - p_yes, m.no_price, bankroll=bankroll),
+                        NO_HARVEST_STAKE)
             return _finish(Signal(m, "No", m.no_token_id, p_yes, m.no_price,
                                   no_edge, stake, sleeve="no_harvest", **meta))
 
@@ -131,10 +133,13 @@ def evaluate_market(m: TempMarket, fc, min_edge: float = MIN_EDGE,
     no_edge = (1.0 - p_yes) - m.no_price
     if yes_edge >= no_edge and yes_edge >= min_edge:
         return _finish(Signal(m, "Yes", m.yes_token_id, p_yes, m.yes_price,
-                              yes_edge, stake_usdc(p_yes, m.yes_price), **meta))
+                              yes_edge,
+                              stake_usdc(p_yes, m.yes_price, bankroll=bankroll),
+                              **meta))
     if no_edge > yes_edge and no_edge >= min_edge:
         return _finish(Signal(m, "No", m.no_token_id, p_yes, m.no_price, no_edge,
-                              stake_usdc(1.0 - p_yes, m.no_price), **meta))
+                              stake_usdc(1.0 - p_yes, m.no_price, bankroll=bankroll),
+                              **meta))
     return None
 
 
@@ -153,7 +158,8 @@ def _build_scorer(station: str, date: str):
 
 def generate_signals(markets: list[TempMarket],
                      min_edge: float = MIN_EDGE,
-                     scorer_for=None, peer_book: dict | None = None) -> list[Signal]:
+                     scorer_for=None, peer_book: dict | None = None,
+                     bankroll: float = BANKROLL) -> list[Signal]:
     """Score every bucket market against one forecast per (station, date).
 
     By default each (station, date) is fetched live via `_build_scorer`. Callers
@@ -162,7 +168,11 @@ def generate_signals(markets: list[TempMarket],
     are made — this is what keeps the daemon the single upstream caller.
 
     `peer_book` (from `peer_signal.fetch_peer_book`) tags each signal with a
-    smart-money stance and nudges its stake."""
+    smart-money stance and nudges its stake.
+
+    `bankroll` is the wealth Kelly sizes against — pass *live equity* (the paper
+    daemon does) so stakes compound as the book grows and shrink in a drawdown;
+    defaults to the static config BANKROLL for one-shot callers (e.g. the CLI)."""
     builder = scorer_for or _build_scorer
     cache: dict[tuple[str, str], object] = {}
     signals: list[Signal] = []
@@ -182,17 +192,18 @@ def generate_signals(markets: list[TempMarket],
         fc = cache[key]
         if fc is None:
             continue
-        sig = evaluate_market(m, fc, min_edge, peer_book)
+        sig = evaluate_market(m, fc, min_edge, peer_book, bankroll=bankroll)
         if sig and sig.stake > 0:
             signals.append(sig)
 
     signals.sort(key=lambda s: s.edge, reverse=True)
-    _apply_portfolio_sizing(signals)
+    _apply_portfolio_sizing(signals, bankroll=bankroll)
     _apply_peer_sizing(signals)
     return signals
 
 
-def _apply_portfolio_sizing(signals: list[Signal]) -> None:
+def _apply_portfolio_sizing(signals: list[Signal],
+                            bankroll: float = BANKROLL) -> None:
     """Re-size the forecast-lane book together when CORR_KELLY is on: correlated
     bets (one heat wave moves many cities) get shrunk via covariance Kelly, and
     the total is held under the cash-buffer-adjusted bankroll. Mutates stakes in
@@ -203,7 +214,7 @@ def _apply_portfolio_sizing(signals: list[Signal]) -> None:
         return
     probs = [s.model_prob if s.side == "Yes" else 1.0 - s.model_prob for s in book]
     prices = [s.price for s in book]
-    investable = BANKROLL * (1.0 - CASH_BUFFER)
+    investable = bankroll * (1.0 - CASH_BUFFER)
     stakes = correlated_stakes(probs, prices, bankroll=investable)
     for s, st in zip(book, stakes):
         s.stake = st

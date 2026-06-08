@@ -17,7 +17,8 @@ linked on their Polymarket profile.
 
 | Wallet (name) | X | All-time PnL / Vol | Edge style | Entry px | Side | Enters | Cities |
 |---|---|---|---|---|---|---|---|
-| `0x594edb…1c11` (ColdMath) | — | $135k / $10.8M | HFT cheap-longshot scatter, both tails | ~0.04 | all BUY (Yes+No) | ~14h before | **NYC, London** |
+| `0x594edb…1c11` (ColdMath) | — | $141k / $11.4M | **same-day ≥0.90 convergence harvest** (capital-weighted) + cheap-tail dust | bimodal: ≥0.90 in size, <0.05 dust | all BUY (Yes+No) | **same-day (69%)** | **NYC** + global |
+| `0x6a8d17…50f9` (onlylucknobrain) | — | $22.5k / $1.7M | diversified **day-ahead** forecast, tiny tickets | ~0.22 (live buckets) | Yes-heavy, some SELL | **+1 to +2 days** | **39 cities, global** |
 | `0xd8f8c1…0f11` (automatedAItradingbot) | — | $65k / $2.6M | cheap-Yes longshots, **our exact Asian set** | ~0.02 | Yes-heavy | ~14h before | Taipei, Shanghai, Seoul, Moscow |
 | `0x1f6679…4c8d` (ShyGuy1) | @Mask4che | $65k / $5.3M | cheap-Yes Asian longshots (top recent PnL) | ~0.15 | Yes-heavy | ~16h before | Seoul, Shenzhen, HK, NYC |
 | `0x15ceff…d5fa` (HondaCivic) | @0xMarchyel | $59k / $7.4M | **No-favorite harvesting** (sell tails) | ~1.00 | No-heavy | ~5h before | Moscow, Chicago, NYC, Toronto |
@@ -29,10 +30,17 @@ linked on their Polymarket profile.
 ## The wallets
 
 ### 1. ColdMath — `0x594edb9112f526fa6a80b8f858a6379c8a2c1c11`
-- **Leaderboard:** $135k PnL on **$10.8M** volume (the highest-turnover weather bot on the board).
-- **Observed:** ~2,800 temp trades/day, **all BUY**, median entry **0.04**, split across **Yes (268) and No (213)**. Concentrated almost entirely in **New York City (407)** + **London (55)**. Enters ~14.5h before resolution. Currently ~450 open positions, ~$46k value, ~-$6.6k unrealized.
-- **Read:** a high-frequency **scatter-the-cheap-tails / two-sided maker** on the two deepest weather books. It isn't forecasting a winner so much as buying every out-of-the-money bucket cheaply on both sides and harvesting the ones that drift.
-- **Helps us:** (a) **Liquidity concentration** — NYC and London are where size lives; our universe is Asian-heavy, so adding NYC/London lets us actually deploy capital. (b) Validates **two-sided cheap-bucket** entries, which our coherence/arb module (`arbitrage.py`) is built for but underuses. (c) A live benchmark for how thin our depth-aware fills assumption is on the deep books.
+- **Leaderboard:** $141k PnL on **$11.4M** volume (the highest-turnover weather bot on the board). 30d +$3.4k, 7d +$112 — the edge is thin per-unit, earned on enormous turnover.
+- **Observed (2026-06-08 refresh, last 437 trades):** **all BUY**, 100% temperature markets, **69% entered same-day** (0% beyond +1 day). Entry prices are **bimodal**: 283 at **<0.05** and 131 at **≥0.95**, almost nothing in between. **Top city NYC (283)** + ~20 global cities. ~500 open positions, **−$8.8k unrealized**.
+- **Capital tells the real story** (where the $ go, not the trade count):
+  | Entry-price band | trades | capital deployed |
+  |---|---|---|
+  | **≥ 0.90** | 131 | **$34,715** (avg $265, max $3,888) |
+  | 0.5–0.9 | 15 | $3,170 |
+  | 0.05–0.5 | 8 | $60 |
+  | < 0.05 | 283 | $101 (dust) |
+- **Read (corrected):** *not* a cheap-tail scatter — that's negligible capital (free lottery dust). The money is a **same-day convergence harvest**: wait until the afternoon peak passes and the daily high is essentially *locked*, then buy the near-certain bucket (≥0.90) **in size** for the last 1–10¢ of convergence, repeatedly, on the deepest book (NYC). This is exactly the zone our own `CLAUDE.md` called "untradeable" — ColdMath proves the market is **slow to reprice locked obs**, which is the thesis behind our Tier-3 nowcaster.
+- **Helps us:** the live proof to **turn on the nowcast** (`NOWCAST=1`) for same-day markets and harvest near-locked favorites — gated by `resolution_audit` so we only buy buckets that are *actually* locked. Runs on negative open inventory, so copy the signal, **not** the bleed (we size off live equity instead).
 
 ### 2. automatedAItradingbot — `0xd8f8c13644ea84d62e1ec88c5d1215e436eb0f11`
 - **Leaderboard:** $65k PnL / $2.6M vol.
@@ -63,6 +71,12 @@ linked on their Polymarket profile.
 - **Observed:** ~162 temp trades/day, median entry **0.96**, **No-heavy (334/107)**, mix of BUY/SELL, cities **NYC (354), London, Paris, Shenzhen**. Small median ticket (~$17).
 - **Read:** a steady **buy-near-certain favorites** grinder on the deep books — low edge per trade, high count, low variance. The "boring but green" archetype.
 - **Helps us:** the low-variance counterweight to ShyGuy1's longshot stacking. Useful as a model for a **safe sub-allocation**: a slice of bankroll on high-confidence near-1.0 buckets our forecast strongly agrees with, to stabilize the equity curve.
+
+### 7. onlylucknobrain — `0x6a8d1709bfb718d8555d315a983c4816278350f9`  (added 2026-06-08)
+- **Leaderboard:** $22.5k PnL / $1.7M vol. 30d +$4.0k — strong recent form on modest size.
+- **Observed (last 471 trades):** 100% temperature, **100% day-ahead** (66% at +1 day, 34% at +2 days; **never same-day**). Mid-range entries — 185 at 0.05–0.2, 141 at 0.2–0.5, 90 at 0.5–0.8 (i.e. the *live, uncertain* buckets, not the tails). **Tiny tickets: median $2, max $46.** **39 cities, global** (Toronto, Milan, Panama, Singapore, Madrid, Tel Aviv, SF…). Yes-heavy (349/122), occasional SELL. −$5.1k open.
+- **Read:** essentially **our strategy, done broader and smaller** — pure day-ahead forecast betting on underpriced live buckets, with radical diversification (hundreds of tiny bets across 39 cities) to crush single-market variance. No nowcast, no tail-harvesting.
+- **Helps us:** the template for **breadth + small size**. Validates expanding `config/cities.yaml` globally and capping per-trade size hard (our `MAX_STAKE_FRACTION`) — diversification, not conviction, smooths the curve. Directly counters the single-bet blowup pattern we hit (one oversized No that tanked realized P&L).
 
 ---
 
