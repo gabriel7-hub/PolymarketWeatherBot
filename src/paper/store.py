@@ -9,13 +9,17 @@ One file, stdlib only. Tables:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
 
 from ..config import ROOT, BANKROLL
 
-DB_PATH = ROOT / "data" / "paper.db"
+# Ledger file. Defaults to the paper DB; point PAPER_DB at a fresh file (e.g.
+# data/live.db) for the live run so real fills don't mingle with — or settle
+# against — the simulated paper history.
+DB_PATH = Path(os.getenv("PAPER_DB", str(ROOT / "data" / "paper.db")))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);

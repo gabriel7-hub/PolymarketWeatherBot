@@ -14,7 +14,7 @@ import requests
 
 from ..config import (GAMMA_API, STATIONS, CASH_BUFFER, PAPER_DEPTH,
                       MAX_DAY_FRACTION, MAX_CITY_FRACTION, EQUITY_SNAPSHOT_INTERVAL,
-                      MIN_STAKE_PER_MARKET)
+                      MIN_STAKE_PER_MARKET, DRY_RUN)
 from ..forecast.openmeteo import fetch_actual_max
 from ..forecast.metar import fetch_station_daily_max
 from ..polymarket import clob
@@ -129,6 +129,27 @@ class PaperBroker:
         # fallback: quoted-price fill (no depth info)
         return round(budget / sig.price, 2), sig.price, budget
 
+    def _place_live(self, sig: Signal, budget: float) -> bool:
+        """Send the real order for `budget` USDC of this signal's token. Returns
+        True only if the CLOB accepts it — a rejection/exception means we do NOT
+        book the fill (no phantom position). A marketable limit at the sized quote
+        plus the same 2¢ slippage tolerance the depth-aware fill allows."""
+        limit = round(min(sig.price + 0.02, 0.99), 3)
+        try:
+            resp = clob.place_order(sig.token_id, "BUY", limit, budget)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! live order FAILED ({e}); not booking {sig.side} "
+                  f"{sig.market.question[:40]}")
+            return False
+        if isinstance(resp, dict) and (resp.get("error") or resp.get("errorMsg")
+                                       or resp.get("success") is False):
+            print(f"  ! live order REJECTED ({resp.get('error') or resp.get('errorMsg')}); "
+                  f"not booking {sig.market.question[:40]}")
+            return False
+        print(f"  LIVE ORDER ok: {sig.side} @~{limit} ${budget:.2f}  "
+              f"{sig.market.question[:40]}")
+        return True
+
     def execute(self, sig: Signal) -> bool:
         """Fill a signal — depth-aware against the live book — subject to the cash
         reserve and the per-resolution-day capital cap, and not already held."""
@@ -146,6 +167,13 @@ class PaperBroker:
             return False
         shares, avg_price, cost = self._simulate_fill(sig, budget)
         if shares <= 0 or cost < MIN_STAKE_PER_MARKET:
+            return False
+        # LIVE: send the real CLOB order this fill represents BEFORE booking it.
+        # Only book the position if the order is accepted, so the ledger never
+        # holds a phantom we don't actually own. DRY_RUN keeps this the paper
+        # simulator (no order sent). Same logic path either way — only the send
+        # is gated. See place_order, which is itself DRY_RUN/PK guarded.
+        if not DRY_RUN and not self._place_live(sig, budget):
             return False
         slippage = round(avg_price - sig.price, 5)
         fill_ratio = round(cost / sig.stake, 4) if sig.stake else 1.0

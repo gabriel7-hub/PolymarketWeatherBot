@@ -145,12 +145,17 @@ ARB_SCAN = _b("ARB_SCAN", "1")
 # (The intraday nowcast still refreshes every tick — it must fold in new obs.)
 FORECAST_TTL = _f("FORECAST_TTL", 5400)   # seconds (default 90 min)
 
-# Wallet / CLOB
-PK = os.getenv("PK", "")
-POLY_PROXY_ADDRESS = os.getenv("POLY_PROXY_ADDRESS", "")
+# Wallet / CLOB. Accept the py-clob-client-style names (PRIVATE_KEY / WALLET_
+# ADDRESS) as fallbacks so creds pasted from a sibling bot's .env just work.
+PK = os.getenv("PK") or os.getenv("PRIVATE_KEY", "")
+POLY_PROXY_ADDRESS = os.getenv("POLY_PROXY_ADDRESS") or os.getenv("WALLET_ADDRESS", "")
 CLOB_API_KEY = os.getenv("CLOB_API_KEY", "")
 CLOB_API_SECRET = os.getenv("CLOB_API_SECRET", "")
 CLOB_API_PASSPHRASE = os.getenv("CLOB_API_PASSPHRASE", "")
+# Polymarket proxy signature scheme: 0=EOA, 1=email/Magic proxy, 2=browser-wallet
+# Safe. This wallet trades live under type 3 (its sibling crypto bot's scheme), so
+# the type must be configurable rather than hardcoded.
+SIGNATURE_TYPE = int(_f("SIGNATURE_TYPE", 2))
 
 # Telegram notifications
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")

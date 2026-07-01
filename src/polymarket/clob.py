@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import requests
 
-from ..config import (CLOB_API, PK, POLY_PROXY_ADDRESS, DRY_RUN,
+from ..config import (CLOB_API, PK, POLY_PROXY_ADDRESS, DRY_RUN, SIGNATURE_TYPE,
                       CLOB_API_KEY, CLOB_API_SECRET, CLOB_API_PASSPHRASE)
 
 
@@ -71,19 +71,30 @@ def walk_asks(book: dict | None, limit_price: float, budget_usdc: float
     return round(shares, 4), round(avg, 5), round(cost, 4)
 
 
-def _client():
-    """Lazily build a py-clob-client. Imported here so the rest of the bot runs
-    without the trading dependency installed."""
-    from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import ApiCreds
+_CACHED_CLIENT = None
 
-    client = ClobClient(
-        CLOB_API, key=PK, chain_id=137,
-        signature_type=2, funder=POLY_PROXY_ADDRESS,
+
+def _client():
+    """Lazily build (and cache) a py_clob_client_v2 client.
+
+    v2 (not the older py_clob_client) is required because this wallet is a
+    POLY_1271 smart-contract wallet (SIGNATURE_TYPE=3, the pUSD Gmail/Magic
+    account) — the old lib's signer only accepts types 0/1/2 and rejects our
+    orders as "Invalid order inputs". Imported here so the rest of the bot runs
+    without the trading dependency installed. Mirrors the sibling crypto bot."""
+    global _CACHED_CLIENT
+    if _CACHED_CLIENT is not None:
+        return _CACHED_CLIENT
+    from py_clob_client_v2 import ClobClient
+    from py_clob_client_v2.clob_types import ApiCreds
+
+    creds = ApiCreds(api_key=CLOB_API_KEY, api_secret=CLOB_API_SECRET,
+                     api_passphrase=CLOB_API_PASSPHRASE) if CLOB_API_KEY else None
+    _CACHED_CLIENT = ClobClient(
+        host=CLOB_API, key=PK, chain_id=137, creds=creds,
+        signature_type=SIGNATURE_TYPE, funder=POLY_PROXY_ADDRESS,
     )
-    if CLOB_API_KEY:
-        client.set_api_creds(ApiCreds(CLOB_API_KEY, CLOB_API_SECRET, CLOB_API_PASSPHRASE))
-    return client
+    return _CACHED_CLIENT
 
 
 def create_api_key() -> None:
@@ -95,32 +106,48 @@ def create_api_key() -> None:
     print(f"CLOB_API_PASSPHRASE={creds.api_passphrase}")
 
 
+def _round_to_tick(price: float, tick) -> float:
+    t = float(tick)
+    return round(round(price / t) * t, 4)
+
+
+def _order_options(client, token_id: str):
+    """Per-market tick size + neg-risk flag, required by v2's order builder."""
+    from py_clob_client_v2 import PartialCreateOrderOptions
+    return PartialCreateOrderOptions(tick_size=client.get_tick_size(token_id),
+                                     neg_risk=client.get_neg_risk(token_id))
+
+
 def place_order(token_id: str, side: str, price: float, size_usdc: float) -> dict:
-    """Buy `size_usdc` worth of `token_id` at limit `price`.
+    """Buy `size_usdc` worth of `token_id` up to limit `price`.
 
-    side is always BUY here (we buy Yes or No tokens directly). Returns the API
-    response, or a dry-run stub.
+    A marketable taker: FAK (fill-and-kill) takes available depth now and cancels
+    the rest. Polymarket market-BUYs are denominated in USDC `amount` (≤2 dp),
+    NOT shares — so we send MarketOrderArgs(amount=$$$), matching the sibling bot.
+    Returns the API response, or a dry-run stub.
     """
-    shares = round(size_usdc / price, 2)
-    order = {"token_id": token_id, "side": "BUY", "price": round(price, 3), "size": shares}
+    amount = round(size_usdc, 2)
+    order = {"token_id": token_id, "side": "BUY", "price": round(price, 3), "amount": amount}
 
-    if DRY_RUN or not PK:
+    if DRY_RUN or not PK or amount <= 0:
         print(f"   [DRY_RUN] would place {order}")
         return {"dry_run": True, **order}
 
-    from py_clob_client.clob_types import OrderArgs
-    from py_clob_client.order_builder.constants import BUY
+    from py_clob_client_v2.clob_types import MarketOrderArgs, OrderType
 
     client = _client()
-    signed = client.create_order(OrderArgs(
-        token_id=token_id, price=round(price, 3), size=shares, side=BUY))
-    resp = client.post_order(signed)
+    tick = client.get_tick_size(token_id)
+    resp = client.create_and_post_market_order(
+        MarketOrderArgs(token_id=token_id, amount=amount, side="BUY",
+                        price=_round_to_tick(price, tick)),
+        options=_order_options(client, token_id),
+        order_type=OrderType.FAK)
     print(f"   [LIVE] order resp: {resp}")
     return resp
 
 
 def place_maker(token_id: str, price: float, shares: float) -> dict:
-    """Post a resting BUY limit (maker) order for `shares` at `price`.
+    """Post a resting BUY limit (maker, GTC) order for `shares` at `price`.
     DRY_RUN-guarded like place_order. Used by the LP daemon for two-sided quoting
     (bid = buy YES; ask = buy NO at 1-ask)."""
     order = {"token_id": token_id, "side": "BUY", "price": round(price, 3),
@@ -129,13 +156,15 @@ def place_maker(token_id: str, price: float, shares: float) -> dict:
         print(f"   [DRY_RUN] would quote {order}")
         return {"dry_run": True, **order}
 
-    from py_clob_client.clob_types import OrderArgs
-    from py_clob_client.order_builder.constants import BUY
+    from py_clob_client_v2 import OrderArgs
+    from py_clob_client_v2.clob_types import OrderType
+    from py_clob_client_v2.order_builder.constants import BUY
 
     client = _client()
-    signed = client.create_order(OrderArgs(
-        token_id=token_id, price=round(price, 3), size=round(shares, 2), side=BUY))
-    return client.post_order(signed)
+    return client.create_and_post_order(
+        OrderArgs(token_id=token_id, price=round(price, 3), size=round(shares, 2), side=BUY),
+        options=_order_options(client, token_id),
+        order_type=OrderType.GTC)
 
 
 def cancel_all() -> dict:
