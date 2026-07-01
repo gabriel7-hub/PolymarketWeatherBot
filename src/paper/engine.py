@@ -77,12 +77,34 @@ class PaperBroker:
     def __init__(self):
         self.con = store.connect()
         self._books: dict[str, dict] = {}
+        self._onchain_tokens: set[str] = set()
         healed = store.backfill_fill_metadata(self.con)
         if healed:
             print(f"  backfilled forecast metadata on {healed} legacy fill(s)")
 
     # ---- execution --------------------------------------------------------
+    def refresh_live_positions(self) -> None:
+        """LIVE only: load the wallet's real on-chain weather positions so dedup
+        is host-independent. Without this, dedup trusts only the local SQLite
+        ledger — so a fresh ledger on a new host (a VPS, a restored box) has no
+        memory of open positions and re-buys every bucket the wallet already
+        holds. No-op in paper mode (there are no real positions to honour)."""
+        if DRY_RUN:
+            self._onchain_tokens = set()
+            return
+        try:
+            from ..polymarket.portfolio import weather_positions
+            self._onchain_tokens = {p["token_id"] for p in weather_positions()}
+        except Exception as e:  # noqa: BLE001 — never let a data-api blip trade unguarded
+            print(f"  ! on-chain position read failed ({e}); dedup falls back to "
+                  f"ledger only — DO NOT run a second host this tick")
+            self._onchain_tokens = set()
+
     def already_open(self, token_id: str) -> bool:
+        # Real on-chain holdings first (source of truth across hosts), then the
+        # local ledger (catches same-tick fills before data-api reflects them).
+        if token_id in self._onchain_tokens:
+            return True
         row = self.con.execute(
             "SELECT 1 FROM fills WHERE token_id=? AND status='open'", (token_id,)
         ).fetchone()

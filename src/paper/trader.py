@@ -64,6 +64,7 @@ def tick(broker: PaperBroker) -> None:
     n_arb = _scan_arb(broker, events) if ARB_SCAN else 0
 
     broker.prefetch_books([s.token_id for s in signals])   # for depth-aware fills
+    broker.refresh_live_positions()   # live: dedup vs REAL holdings, not just this ledger
     taken = set()
     for s in signals:
         broker.log_forecast(s)          # record every forecast for calibration
